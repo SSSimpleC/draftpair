@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="review-project" content="__REVIEW_SCOPE__">
+<meta name="color-scheme" content="light">
+<title>页畔 · QMD Margin</title>
+<link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script>
+</head><body>
+<header class="topbar">
+  <button class="icon-btn" id="tocBtn" title="章节目录" aria-label="章节目录" aria-controls="toc"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg></button>
+  <div class="crumb" id="crumb">论文批注与修订</div><div class="grow"></div>
+  <div class="seg flows" role="group" aria-label="阅读范围"><button data-flow="chapter">按章</button><button data-flow="all">连续全文</button></div>
+  <div class="seg" role="group" aria-label="视图"><button data-view="single">阅读</button><button data-view="compare" disabled>对照</button></div>
+  <div class="grow"></div><span class="status" id="status" role="status"></span>
+  <button class="btn" id="panelBtn" aria-controls="panel">批注<span class="n" id="panelN" hidden></span></button>
+  <button class="btn primary" id="submitBtn" disabled>提交批注<span class="n" id="submitN" hidden></span></button>
+</header>
+<div class="app" id="app">
+  <nav class="toc" id="toc" aria-label="章节目录"></nav>
+  <main>
+    <div class="readbar" id="readbar" hidden>
+      <label id="bookLabel">全文 <select id="bookPick"><option value="working">工作稿</option><option value="formal">正式正文</option></select></label>
+      <label id="versionLabel">阅读版本 <select id="versionPick"></select></label>
+    </div>
+    <div class="cbar" id="cbar">
+      <div class="side"><select id="leftPick" aria-label="左侧对照版本"></select></div>
+      <div class="tabs seg" role="group" aria-label="窄窗口切换"><button data-side="left">原稿</button><button data-side="right">最新稿</button></div>
+      <div class="mid"><button class="icon-btn" id="chgPrev" aria-label="上一处改动" title="上一处改动">↑</button><span class="counter" id="chgCount"></span><button class="icon-btn" id="chgNext" aria-label="下一处改动" title="下一处改动">↓</button><button class="chk" id="hlBtn" aria-pressed="true">高亮</button><button class="chk" id="syncBtn" aria-pressed="true">联动</button></div>
+      <button class="btn compacte" id="compactLeft" hidden>与上一稿</button><div class="side end"><span id="rLab"></span></div>
+    </div>
+    <div class="stage" id="stage"><span class="loading">正在读取论文…</span></div>
+  </main>
+  <aside class="panel" id="panel" aria-label="批注列表" hidden>
+    <div class="p-head"><h3>批注</h3><div class="seg" role="group" aria-label="批注范围"><button data-pf="chapter">本章</button><button data-pf="all">全部</button></div><button class="icon-btn" id="panelClose" aria-label="关闭批注栏">✕</button></div>
+    <div class="p-order">
+      <div class="seg" role="group" aria-label="批注排序"><button data-order="recent">最新在前</button><button data-order="article">文章顺序</button></div>
+      <label class="follow-option" id="followOption" hidden><input type="checkbox" role="switch" id="followText">跟随正文</label>
+    </div>
+    <div class="p-filter" id="pFilter"><span id="pFilterTxt"></span><button class="linkbtn" id="pFilterClear">显示全部</button></div>
+    <div class="p-body" id="pBody" tabindex="0" aria-label="批注条目"></div>
+    <div class="p-range" id="pRange" hidden></div>
+  </aside>
+</div>
+<button class="float-btn" id="selBtn">✎ 批注</button>
+<button class="anchor-btn" id="imageBtn">查看原图</button>
+<button class="anchor-btn" id="anchorBtn">＋ 批注</button>
+<div class="editor" id="editor" role="dialog" aria-label="写批注">
+  <div class="ed-head"><span class="where" id="edWhere"></span><div class="seg" role="group" aria-label="批注方式"><button data-mode="comment">意见</button><button data-mode="replace">逐字替换</button></div><button id="edFold" class="icon-btn" title="收起草稿" aria-label="收起草稿">−</button></div>
+  <div class="ed-quote" id="edQuote"></div><div class="ed-warn" id="edWarn" role="status"></div>
+  <textarea id="edText" rows="4" aria-label="批注内容" aria-describedby="edHint"></textarea>
+  <div class="ed-foot"><span class="hint" id="edHint">Enter 保存 · Shift+Enter 换行 · Esc 收起</span><button class="btn" id="edCancel">取消</button><button class="btn primary" id="edSave">保存</button></div>
+</div>
+<dialog id="submitDlg" aria-labelledby="dlgTitle"><div class="dlg-h"><h3 id="dlgTitle">提交批注</h3><p id="dlgSub"></p></div><div class="dlg-b" id="dlgBody"></div><div class="dlg-f"><button class="btn" id="dlgCancel">再看看</button><button class="btn primary" id="dlgOk">提交</button></div></dialog>
+<dialog id="imageDlg" aria-label="查看原图"><button class="btn" id="imageClose" autofocus>关闭</button><img id="largeImage" alt=""></dialog>
+<div class="toast" id="toast" role="status"><span id="toastTxt"></span><button id="toastAct" hidden></button></div>
+</body></html>

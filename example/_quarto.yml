@@ -1,0 +1,13 @@
+project:
+  type: book
+  output-dir: build
+
+book:
+  title: "窗边的一天"
+  author: "页畔示例"
+  chapters:
+    - index.qmd
+    - observation.qmd
+
+lang: zh
+format: typst
