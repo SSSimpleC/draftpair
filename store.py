@@ -1,9 +1,9 @@
-"""Local thesis-review ledger. All writes stay inside data_dir, apart from renderer-owned asset storage there.
+"""Local document-review ledger.
 
 Store(root, data_dir, renderer=None) opens or creates the ledger. Each public call
 opens its own short-lived SQLite connection and can be used from a threaded server.
-The database is authoritative. Submission handoffs / version QMD files are recoverable
-projections. In particular never edit the exported V*.qmd in place to prepare a draft.
+The database is authoritative. Handoffs and version files are recoverable projections.
+Export a separate candidate before editing it.
 The renderer optionally implements snapshot_assets(text, chapter_id) -> asset hash map.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ import shlex
 import sqlite3
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -38,18 +39,36 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def atomic_write(path, data):
+def handoff_command(arguments, windows):
+    if windows:
+        # A PowerShell literal doubles apostrophes; & invokes even a quoted executable.
+        return '& ' + ' '.join("'" + arg.replace("'", "''") + "'" for arg in arguments)
+    return shlex.join(arguments)
+
+
+def atomic_write(path, data, *, preserve_mode=False):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".writing-", delete=False) as file:
-        temp = Path(file.name)
-        try:
+    file = tempfile.NamedTemporaryFile(dir=path.parent, prefix=".writing-", delete=False)
+    temp = Path(file.name)
+    try:
+        with file:
+            if preserve_mode and os.name != 'nt' and path.is_file():
+                os.fchmod(file.fileno(), path.stat().st_mode & 0o777)
             file.write(data)
             file.flush()
             os.fsync(file.fileno())
-            file.close()
-            os.replace(temp, path)
-        finally:
-            temp.unlink(missing_ok=True)
+        # Ordinary Windows readers can briefly hold a handle without delete-sharing.
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError as error:
+                if getattr(error, 'winerror', None) not in {5, 32, 33} or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.025)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 class StoreError(ValueError):
@@ -134,12 +153,12 @@ class Store:
     def _chapter(self, ch):
         checked(isinstance(ch, str) and ch and "\x00" not in ch, "章节路径无效。")
         rel = Path(ch)
-        safe = rel.suffix == ".qmd" and not rel.is_absolute() and ".." not in rel.parts
-        checked(safe and ch == rel.as_posix(), "章节不是项目内的 QMD。")
+        safe = rel.parts and not rel.is_absolute() and ".." not in rel.parts
+        checked(safe and ch == rel.as_posix(), "文稿需要项目内的相对路径。")
         if self.is_chapter is not None:
-            checked(self.is_chapter(ch), "章节未在 _quarto.yml 的书稿目录中登记。")
+            checked(self.is_chapter(ch), "文稿未在项目目录中登记。")
         path = (self.root / rel).resolve()
-        checked(path.is_relative_to(self.root), "章节路径越出论文目录。")
+        checked(path.is_relative_to(self.root), "文稿路径越出项目目录。")
         return path
 
     @staticmethod
@@ -160,16 +179,16 @@ class Store:
         checked(row, "该章没有这个稿本。", 404)
         return row
 
-    def _version_file(self, rid, n):
-        return self.data_dir / "rounds" / rid / f"V{n}.qmd"
+    def _version_file(self, ch, rid, n):
+        return self.data_dir / "rounds" / rid / f"V{n}{Path(ch).suffix}"
 
-    def _vmeta(self, row):
+    def _vmeta(self, ch, row):
         rid, n = row["round_id"], row["n"]
         return {"id": f"{rid}:{n}", "round": rid, "number": n, "time": row["created"],
-                "source_hash": row["hash"], "path": str(self._version_file(rid, n))}
+                "source_hash": row["hash"], "path": str(self._version_file(ch, rid, n))}
 
     def _round_meta(self, con, row):
-        versions = [self._vmeta(v) for v in con.execute(
+        versions = [self._vmeta(row["ch"], v) for v in con.execute(
             "SELECT round_id,n,created,hash FROM versions WHERE round_id=? ORDER BY n", (row["id"],))]
         return {"id": row["id"], "round": row["id"], "ch": row["ch"], "started": row["started"],
                 "closed": row["closed"], "merged_version": row["merged_version"], "versions": versions,
@@ -229,7 +248,8 @@ class Store:
                         "SELECT data FROM batches ORDER BY n")],
                     "chapters": {r["ch"]: r for r in rounds if not r["closed"]}, "rounds": rounds}
 
-    def _live_bytes(self, ch):
+    def read_source(self, ch):
+        """Read the current registered document and validate its original UTF-8 bytes."""
         try:
             raw = self._chapter(ch).read_bytes()
         except FileNotFoundError as exc:
@@ -239,16 +259,17 @@ class Store:
 
     @staticmethod
     def _decode(raw):
+        checked(b"\0" not in raw, "请选择 UTF-8 文本源文件。")
         try:
             return raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise StoreError(400, "QMD 文件需要 UTF-8 编码。") from exc
+            raise StoreError(400, "文稿源文件需要 UTF-8 编码。") from exc
 
     def read_version(self, ch, version):
-        """Return exact UTF-8 QMD bytes, for a live:<sha256> or historical version id."""
+        """Return original source bytes for a live:<sha256> or historical version id."""
         self._chapter(ch)
         if self._live_version(version):
-            raw = self._live_bytes(ch)
+            raw = self.read_source(ch)
             checked(version == f"live:{digest(raw)}", "正式正文已更新，请刷新。", 409)
             return raw
         with self._tx() as con:
@@ -261,7 +282,7 @@ class Store:
             return {"id": version, "round": None, "number": None, "time": None,
                     "source_hash": digest(raw), "path": str(self._chapter(ch))}
         with self._tx() as con:
-            return self._vmeta(self._version_row(con, ch, version))
+            return self._vmeta(ch, self._version_row(con, ch, version))
 
     def version_assets(self, ch, version):
         self._chapter(ch)
@@ -277,7 +298,7 @@ class Store:
         con.execute("INSERT INTO versions VALUES(?,?,?,?,?,?)",
                     (rid, n, stamp(), digest(raw), raw, encode(assets)))
         # Immutable derivative; repair projections from the committed blob after an interruption.
-        con.version_copies.append((self._version_file(rid, n), raw))
+        con.version_copies.append((self._version_file(ch, rid, n), raw))
         return f"{rid}:{n}"
 
     @staticmethod
@@ -362,7 +383,7 @@ class Store:
         self._available(con, ch)
         if not row:
             checked(self._live_version(target), "这轮批注已经归档，请核对新稿。", 409)
-            raw = self._live_bytes(ch)
+            raw = self.read_source(ch)
             rid = uuid.uuid4().hex
             con.execute("INSERT INTO rounds(id,ch,started) VALUES(?,?,?)", (rid, ch, stamp()))
             self._add_version(con, ch, rid, 0, raw)
@@ -461,7 +482,7 @@ class Store:
                     note.update(status="sent", batch=n, submitted=created, revision=note["revision"] + 1)
                     self._put(con, note)
                     notes.append(note)
-                parents = {note["ch"]: self._vmeta(self._version_row(con, note["ch"], note["target_version"]))
+                parents = {note["ch"]: self._vmeta(note["ch"], self._version_row(con, note["ch"], note["target_version"]))
                            for note in notes}
                 batch = {"id": n, "number": n, "time": created, "ids": ids, "chapters": list(parents),
                          "annotations": notes, "parents": parents}
@@ -507,7 +528,7 @@ class Store:
                 if note["round"] == row["id"] and note["status"] == "pending" and note["target_version"] != version:
                     note.update(recheck=True, revision=note["revision"] + 1)
                     self._put(con, note)
-            result = self._vmeta(self._version_row(con, ch, version))
+            result = self._vmeta(ch, self._version_row(con, ch, version))
         self._refresh_exports()
         return result
 
@@ -549,8 +570,8 @@ class Store:
 
     def _projections(self, con, repair=True):
         if repair:
-            for row in con.execute("SELECT * FROM versions"):
-                path = self._version_file(row["round_id"], row["n"])
+            for row in con.execute("SELECT r.ch, v.* FROM versions v JOIN rounds r ON r.id=v.round_id"):
+                path = self._version_file(row["ch"], row["round_id"], row["n"])
                 if not path.is_file() or digest(path.read_bytes()) != row["hash"]:
                     atomic_write(path, bytes(row["qmd"]))
         last = None
@@ -567,7 +588,7 @@ class Store:
         parents = {}
         for note in unresolved:
             ch = note["ch"]
-            parents[ch] = self._vmeta(self._version_row(con, ch, self._head(con, note["round"])))
+            parents[ch] = self._vmeta(ch, self._version_row(con, ch, self._head(con, note["round"])))
         latest = {**self._batch_meta(last), "parents": parents, "annotations": unresolved,
                   "ids": [a["id"] for a in unresolved], "chapters": list(parents),
                   "latest_batch": self._batch_meta(last)}
@@ -577,28 +598,30 @@ class Store:
         contents = ((base.with_suffix(".json"), pretty(data)), (base.with_suffix(".md"), self._markdown(data)))
         for path, content in contents:
             encoded = content.encode("utf-8")
-            if immutable and path.is_file() and path.read_bytes() == encoded:
+            if immutable and path.is_file() and (path.suffix == ".md" or path.read_bytes() == encoded):
                 continue
             atomic_write(path, encoded)
 
     def _markdown(self, data):
-        quote = shlex.quote
-        lines = [f'# 论文批注 · 第 {data["number"]} 批', '', f'提交于 {data["time"]}', '']
+        windows = os.name == 'nt'
+        lines = [f'# 文稿批注 · 第 {data["number"]} 批', '', f'提交于 {data["time"]}', '']
         if "latest_batch" in data:
             lines += ['以下汇总各批次仍待处理和待确认的意见。条目保留原提交批次和所引版本。', '']
         lines += ['## 处理方式', '',
-                  '按章从以下父稿另存为新的候选 QMD，遵循作者在论文项目中约定的写作规范。每条意见的原句、上下文、行号与源版本一并核对。逐字替换意见保留作者措辞。历史版本中的选文须对照最新父稿确认位置。',
-                  '', '发布时以父稿版本编号校验，逐项标明已经处理的批注。遇到需要作者回答的问题，可以提供 --questions 后接 JSON 文件，内容为批注编号到说明的映射。正式 QMD 的合并由作者另行明确提出。', '']
+                  '从下列父稿导出独立候选文件。保留作者的源文件格式和项目写作约定，对照原句、上下文、源码行号和所引版本修改。逐字替换采用作者给出的文字。选文引自旧稿时，在当前父稿中核对对应位置。',
+                  '', '发布时逐条关联落实的批注。需要作者裁决时，用 --questions 指定 JSON 文件，键为批注编号，值为待确认的问题。作者明确指定文稿和稿次后才合并到正式文件。', '']
         if not data["annotations"]:
             lines.append('当前没有仍待处理的已提交意见。')
-        cli = shlex.join([sys.executable, str(Path(__file__).with_name('review.py').resolve()),
-                          '--root', str(self.root), '--data', str(self.data_dir)])
+        cli = [sys.executable, str(Path(__file__).with_name('review.py').resolve()),
+               '--root', str(self.root), '--data', str(self.data_dir)]
         for ch, meta in data["parents"].items():
-            candidate = quote(str(self.data_dir / 'candidates' / meta["id"].replace(':', '-') / ch))
+            candidate = str(self.data_dir / 'candidates' / meta["id"].replace(':', '-') / ch)
+            export = cli + ['export', '--chapter', ch, '--version', meta["id"], '--output', candidate]
+            publish = cli + ['publish', '--chapter', ch, '--input', candidate, '--parent', meta["id"], '--applied', '批注编号']
             lines += [f'## {ch}', '', f'父稿版本 `{meta["id"]}`', '', f'父稿原文件 `{meta["path"]}`', '',
-                      '先导出父稿，修改导出的文件，然后按实际处理的批注编号发布。', '', '```sh',
-                      f'{cli} export --chapter {quote(ch)} --version {quote(meta["id"])} --output {candidate}',
-                      f'{cli} publish --chapter {quote(ch)} --input {candidate} --parent {quote(meta["id"])} --applied 批注编号', '```', '']
+                      '先导出父稿，修改导出的文件，然后按实际处理的批注编号发布。', '',
+                      '```powershell' if windows else '```sh',
+                      handoff_command(export, windows), handoff_command(publish, windows), '```', '']
             for a in data["annotations"]:
                 if a["ch"] != ch:
                     continue

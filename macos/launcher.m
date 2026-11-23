@@ -7,10 +7,10 @@
 @implementation ReviewLauncher
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NSString *directory = NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent;
-    NSString *command = [directory stringByAppendingPathComponent:@"打开页畔.command"];
+    NSString *command = [directory stringByAppendingPathComponent:@"打开对稿.command"];
     if (![NSFileManager.defaultManager fileExistsAtPath:command]) {
         NSAlert *alert = [NSAlert new];
-        alert.messageText = @"请将「页畔.app」放在「打开页畔.command」旁边";
+        alert.messageText = @"请将「对稿.app」放在「打开对稿.command」旁边";
         [alert runModal];
         [NSApp terminate:nil];
         return;
@@ -31,7 +31,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             if (finished.terminationStatus != 0) {
                 NSAlert *alert = [NSAlert new];
-                alert.messageText = @"页畔启动失败";
+                alert.messageText = @"对稿启动失败";
                 alert.informativeText = [@"请查看启动日志：\n" stringByAppendingString:logPath];
                 [alert runModal];
             }
@@ -41,7 +41,7 @@
     NSError *error;
     if (![self.task launchAndReturnError:&error]) {
         NSAlert *alert = [NSAlert new];
-        alert.messageText = @"无法启动页畔";
+        alert.messageText = @"无法启动对稿";
         alert.informativeText = error.localizedDescription;
         [alert runModal];
         [NSApp terminate:nil];

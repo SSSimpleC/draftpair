@@ -1,12 +1,17 @@
 """Run with python3 regression_store.py. Tests use a temporary thesis and database."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import store
+from file_lock import file_lock
 from store import Store, StoreError, digest
 
 
@@ -30,7 +35,7 @@ class StoreRegression(unittest.TestCase):
         (self.root / "chapters").mkdir(parents=True)
         (self.root / "assets").mkdir()
         self.asset = self.root / "assets/plot.svg"
-        self.asset.write_text("<svg>甲</svg>")
+        self.asset.write_text("<svg>甲</svg>", encoding="utf-8")
         self.raw = "# 标题\r\n\r\n原句。\r\n\r\n<!-- 隐藏写作提示 -->\r\n".encode("utf-8")
         for ch in (self.first, self.second):
             (self.root / ch).write_bytes(self.raw)
@@ -73,7 +78,7 @@ class StoreRegression(unittest.TestCase):
         checked = self.ledger.save({**note, "recheck": False, "quote": "变化。"})
         self.assertEqual(self.ledger.submit(self.refs(checked), "retry")["number"], 1)
         hashes = self.ledger.version_assets(self.first, base)
-        self.asset.write_text("<svg>乙</svg>")
+        self.asset.write_text("<svg>乙</svg>", encoding="utf-8")
         self.assertNotEqual(hashes["assets/plot.svg"], digest(self.asset.read_bytes()))
         self.assertEqual(hashes, self.ledger.version_assets(self.first, base))
 
@@ -90,15 +95,15 @@ class StoreRegression(unittest.TestCase):
         snap = (self.data / "submissions/0001.json").read_bytes()
         next_note = self.ledger.save(self.payload(self.first, "c"))
         self.ledger.submit(self.refs(next_note), "follow")
-        self.assertEqual({a["id"] for a in json.loads((self.data/"latest.json").read_text())["annotations"]},
+        self.assertEqual({a["id"] for a in json.loads((self.data/"latest.json").read_text(encoding='utf-8'))["annotations"]},
                          {"a", "b", "c"})
         f = self.draft_file(self.raw + b"\nNew.\n")
         v = self.ledger.publish(self.first, f, notes[0]["target_version"], ["a"], {"c": "需要页码。"})
         self.assertEqual(v["number"], 1)
-        handoff = json.loads((self.data / "latest.json").read_text())
+        handoff = json.loads((self.data / "latest.json").read_text(encoding='utf-8'))
         self.assertEqual(handoff["parents"][self.first]["id"], v["id"])
         self.assertEqual({a["id"]: a["status"] for a in handoff["annotations"]}, {"b":"sent", "c":"question"})
-        self.assertIn("第 3–3 行", (self.data / "latest.md").read_text())
+        self.assertIn("第 3–3 行", (self.data / "latest.md").read_text(encoding='utf-8'))
         self.assertEqual(snap, (self.data / "submissions/0001.json").read_bytes())
 
     def test_cross_chapter_save_failure_is_atomic(self):
@@ -157,7 +162,7 @@ class StoreRegression(unittest.TestCase):
                 raise RuntimeError("模拟构建未通过")
         self.assertEqual(self.ledger.round_info(self.first)["latest"], v2)
         self.error(409, self.ledger.close_round, self.first, v1)
-        before = json.loads((self.data/"submissions/0001.json").read_text())
+        before = json.loads((self.data/"submissions/0001.json").read_text(encoding='utf-8'))
         self.ledger.close_round(self.first, v2, v1)
         self.assertFalse(self.ledger.round_info(self.first))
         self.assertTrue(self.ledger.round_info(self.second))
@@ -165,7 +170,7 @@ class StoreRegression(unittest.TestCase):
         self.assertEqual(closed["merged_version"], v1)
         ledger = Store(self.root, self.data, self.renderer)
         self.assertEqual(ledger.state(), self.ledger.state())
-        self.assertEqual(before, json.loads((self.data/"submissions/0001.json").read_text()))
+        self.assertEqual(before, json.loads((self.data/"submissions/0001.json").read_text(encoding='utf-8')))
         # A fresh round may quote a historical version while targeting today's live source.
         new = ledger.save(self.payload(self.first, "history", source_version=v1))
         self.assertEqual(new["source_version"], v1)
@@ -181,6 +186,69 @@ class StoreRegression(unittest.TestCase):
         self.ledger.submit(selection, "job")
         self.assertTrue((self.data / "latest.md").is_file())
         self.assertEqual(len(self.ledger.state()["batches"]), 1)
+
+    def test_native_suffixes_and_immutable_older_handoff(self):
+        names = ("游记.md", "tex/正文.tex", "letters.story", "无后缀")
+        for name in names:
+            path = self.root / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(self.raw)
+        notes = [self.ledger.save(self.payload(ch, f'piece{i}')) for i, ch in enumerate(names)]
+        self.ledger.submit(self.refs(*notes), "multi-format")
+        legacy_md = self.data / "submissions/0001.md"
+        legacy_md.write_text("第一次提交时保存的旧版交接格式\n", encoding="utf-8")
+        for ch, note in zip(names, notes):
+            original = self.ledger.version_info(ch, note["source_version"])
+            self.assertEqual(Path(original["path"]).name, "V0" + Path(ch).suffix)
+            self.assertEqual(Path(original["path"]).read_bytes(), self.raw)
+            Path(original["path"]).unlink()
+        restored = Store(self.root, self.data)
+        for ch, note in zip(names, notes):
+            original = restored.version_info(ch, note["source_version"])
+            self.assertEqual(Path(original["path"]).read_bytes(), self.raw)
+            meta = restored.publish(ch, self.draft_file(self.raw + b"Draft\r\n"), original["id"])
+            self.assertEqual(Path(meta["path"]).name, "V1" + Path(ch).suffix)
+            self.assertEqual((self.root / ch).read_bytes(), self.raw)
+        self.assertEqual(legacy_md.read_text(encoding='utf-8'), "第一次提交时保存的旧版交接格式\n")
+        handoff = (self.data / "latest.md").read_text(encoding='utf-8')
+        for ch in names:
+            self.assertIn(ch, handoff)
+        self.assertNotIn("候选 QMD", handoff)
+
+    def test_cross_process_lock_timeout_and_release_after_abnormal_exit(self):
+        lock = self.dir / "写作锁.lock"
+        code = ('import os,sys\nfrom file_lock import file_lock\n'
+                'try:\n with file_lock(sys.argv[1],timeout=float(sys.argv[2])):\n  os._exit(0)\n'
+                'except BlockingIOError: sys.exit(10)\nexcept TimeoutError: sys.exit(11)')
+        def child(timeout):
+            result = subprocess.run([sys.executable, '-c', code, str(lock), str(timeout)],
+                                    cwd=Path(__file__).resolve().parent, timeout=5)
+            return result.returncode
+        with file_lock(lock):
+            self.assertEqual(child(0), 10)
+            self.assertEqual(child(.15), 11)
+        self.assertEqual(child(0), 0)
+        with file_lock(lock, timeout=0):
+            pass
+
+    def test_powershell_literal_command(self):
+        argv = [r"D:\我的 书架\Python's env\python.exe", '--chapter', "drafts/桥 & 雨's.md"]
+        line = store.handoff_command(argv, True)
+        self.assertEqual(line, r"& 'D:\我的 书架\Python''s env\python.exe' '--chapter' 'drafts/桥 & 雨''s.md'")
+        self.assertEqual(store.shlex.split(store.handoff_command(argv, False)), argv)
+
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell execution on a native Windows runner')
+    def test_powershell_delivers_paths_with_spaces_apostrophes_and_unicode(self):
+        executable = shutil.which('powershell') or shutil.which('pwsh')
+        self.assertIsNotNone(executable)
+        script = self.dir / "写作 & agent's demo.py"
+        script.write_text('import sys\nfrom pathlib import Path\n'
+                          'Path(sys.argv[1]).write_bytes(sys.argv[2].encode("utf-8"))', encoding='utf-8')
+        output = self.dir / "实测 & draft's file.txt"
+        value = "稿件's $variable & object"
+        line = store.handoff_command([sys.executable, str(script), str(output), value], True)
+        subprocess.run([executable, '-NoProfile', '-NonInteractive', '-Command', line], check=True, timeout=15)
+        self.assertEqual(output.read_text(encoding='utf-8'), value)
 
 
 if __name__ == "__main__":

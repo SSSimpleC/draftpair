@@ -9,34 +9,41 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import review
 from store import Store, StoreError, digest
 
 
+@unittest.skipUnless(shutil.which('make'), 'Quarto compatibility tests use GNU Make')
 class MergeRegression(unittest.TestCase):
     first = 'chapters/one.qmd'
     second = 'chapters/two.qmd'
     base = b"# Intro\n\nA sentence.\n\nAnchor two.\n\nAnchor three.\n\nA final sentence.\n"
     candidate = base.replace(b'A final', b'A revised final')
-    make = "check:\n\t@true\nrender:\n\t@mkdir -p build && cp fixture.pdf build/thesis.pdf\n"
-
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.dir = Path(self.temp.name).resolve()
         root, data = self.dir / 'source', self.dir / 'data'
         (root / 'chapters').mkdir(parents=True)
-        (root / 'Makefile').write_text(self.make)
+        py = '"' + Path(sys.executable).as_posix() + '"'
+        self.noop = py + ' -c "pass"'
+        self.fail_check = py + ' -c "raise SystemExit(1)"'
+        self.make = f'check:\n\t@{self.noop}\nrender:\n\t@{py} make_fixture.py\n'
+        (root / 'Makefile').write_bytes(self.make.encode())
+        (root / 'make_fixture.py').write_text('from pathlib import Path\nimport shutil\np=Path("build")\n'
+            'p.mkdir(exist_ok=True)\nshutil.copyfile("fixture.pdf", p / "thesis.pdf")\n', encoding='utf-8')
         # Synthetic marker for format, path and digest tests; no real visual approval.
         (root / 'fixture.pdf').write_bytes(b'%PDF-1.7\n% synthetic logic-only marker\n%%EOF\n')
         self.ledger = Store(root, data)
-        self.app = SimpleNamespace(root=root, data=data, store=self.ledger)
+        self.app = SimpleNamespace(root=root, data=data, store=self.ledger, refresh_stats=Mock())
         self.source = root / self.first
         for ch in (self.first, self.second):
             (root/ch).write_bytes(self.base)
@@ -65,6 +72,7 @@ class MergeRegression(unittest.TestCase):
     def test_clean_merge_preserves_external_changes_and_other_chapter(self):
         self.source.write_bytes(self.base.replace(b'A sentence', b'New sentence'))
         record = self.enter()
+        self.app.refresh_stats.assert_called_once_with(self.app.root/'build/thesis.pdf')
         self.assertEqual(self.source.read_bytes(), self.candidate.replace(b'A sentence', b'New sentence'))
         self.assertTrue(self.ledger.round_info(self.first))
         self.assertRaises(StoreError, self.ledger.publish, self.first, self.input, self.version)
@@ -76,7 +84,7 @@ class MergeRegression(unittest.TestCase):
         self.assertIsNone(self.ledger.merge_owner(self.first))
         self.assertTrue(self.ledger.round_info(self.second))
         self.complete(record)  # a replay is harmless
-        self.assertEqual(json.loads(record.read_text())['status'], 'complete')
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['status'], 'complete')
 
     def test_content_conflict_never_writes_source(self):
         before = self.base.replace(b'A final', b'Conflicting final')
@@ -87,20 +95,20 @@ class MergeRegression(unittest.TestCase):
         self.assertIsNone(self.ledger.merge_owner(self.first))
         data = self.app.data / 'merges'
         j = next(data.glob('*/journal.json'))
-        self.assertEqual(json.loads(j.read_text())['status'], 'conflict')
+        self.assertEqual(json.loads(j.read_text(encoding='utf-8'))['status'], 'conflict')
         self.assertIn(b'<<<<<<<', (j.parent / 'merged.qmd').read_bytes())
 
     def test_check_failure_resumes_without_replacing_source(self):
         make = self.app.root / 'Makefile'
-        make.write_text('check:\n\t@false\nrender:\n\t@true\n')
+        make.write_bytes(f'check:\n\t@{self.fail_check}\nrender:\n\t@{self.noop}\n'.encode())
         with self.assertRaisesRegex(ValueError, 'make check'):
             review.merge(self.app, self.first, self.version)
         j = next((self.app.data/'merges').glob('*/journal.json'))
-        self.assertEqual(json.loads(j.read_text())['status'], 'validation-failed')
+        self.assertEqual(json.loads(j.read_text(encoding='utf-8'))['status'], 'validation-failed')
         inode = self.source.stat().st_ino
-        make.write_text(self.make)
+        make.write_bytes(self.make.encode())
         self.cli('merge-resume', '--journal', j)
-        self.assertEqual(json.loads(j.read_text())['status'], 'awaiting-pdf-review')
+        self.assertEqual(json.loads(j.read_text(encoding='utf-8'))['status'], 'awaiting-pdf-review')
         self.assertEqual(inode, self.source.stat().st_ino)
         self.complete(j)
 
@@ -111,14 +119,14 @@ class MergeRegression(unittest.TestCase):
         build.write_bytes(b'%PDF-1.7\n% unrelated later build\n')
         self.assertRaisesRegex(ValueError, 'PDF 已变化', self.complete, record, build)
         self.complete(record, record.parent / 'review.pdf')
-        self.assertEqual(json.loads(record.read_text())['pdf_hash'],
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['pdf_hash'],
                          digest((self.app.root/'fixture.pdf').read_bytes()))
 
     def test_successful_make_cannot_use_an_untouched_old_pdf(self):
         build = self.app.root / 'build'
         build.mkdir()
         (build / 'stale.pdf').write_bytes((self.app.root/'fixture.pdf').read_bytes())
-        (self.app.root/'Makefile').write_text('check:\n\t@true\nrender:\n\t@true\n')
+        (self.app.root/'Makefile').write_bytes(f'check:\n\t@{self.noop}\nrender:\n\t@{self.noop}\n'.encode())
         with self.assertRaisesRegex(ValueError, '本次构建生成'):
             self.enter()
 
@@ -130,7 +138,7 @@ class MergeRegression(unittest.TestCase):
             self.complete(record)
         self.assertEqual(self.source.read_bytes(), latest)
         self.assertIsNone(self.ledger.merge_owner(self.first))
-        self.assertEqual(json.loads(record.read_text())['status'], 'external-change')
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['status'], 'external-change')
         self.assertTrue(self.ledger.round_info(self.first))
 
     def test_two_concurrent_merges_produce_only_one_write(self):
@@ -149,23 +157,11 @@ class MergeRegression(unittest.TestCase):
 
     def crash_source(self, after):
         # Use a child process and _exit, so Python cleanup/finally cannot mask the crash.
-        child = os.fork()
-        if child == 0:
-            original = review.atomic
-            def crash(path, data):
-                if path == self.source and not after:
-                    os._exit(47)
-                original(path, data)
-                if path == self.source:
-                    os._exit(47)
-            review.atomic = crash
-            try:
-                review.merge(self.app, self.first, self.version)
-            finally:
-                os._exit(48)
-        self.assertEqual(os.waitpid(child, 0)[1] >> 8, 47)
+        child = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--crash-source',
+                                str(self.app.root), str(self.app.data), self.first, self.version, str(int(after))])
+        self.assertEqual(child.returncode, 47)
         j = next((self.app.data/'merges').glob('*/journal.json'))
-        self.assertEqual(json.loads(j.read_text())['status'], 'prepared')
+        self.assertEqual(json.loads(j.read_text(encoding='utf-8'))['status'], 'prepared')
         self.assertEqual(self.source.read_bytes(), self.candidate if after else self.base)
         inode = self.source.stat().st_ino
         self.cli('merge-resume', '--journal', j)
@@ -190,10 +186,118 @@ class MergeRegression(unittest.TestCase):
         with patch.object(review, 'json_write', side_effect=fail), self.assertRaises(OSError):
             self.complete(record)
         self.assertIsNone(self.ledger.round_info(self.first))
-        self.assertEqual(json.loads(record.read_text())['status'], 'pdf-reviewed')
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['status'], 'pdf-reviewed')
         self.cli('merge-resume', '--journal', record)
-        self.assertEqual(json.loads(record.read_text())['status'], 'complete')
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['status'], 'complete')
+
+
+class ManifestMerge(unittest.TestCase):
+    original = b"Original line.\r\n\r\nMiddle anchor.\r\n\r\nLast line.\r\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.data = self.root / '.draftpair'
+        self.ledger = Store(self.root, self.data)
+        self.app = SimpleNamespace(root=self.root, data=self.data, store=self.ledger, refresh_stats=Mock())
+
+    def prepare(self, name, build=None):
+        self.ch = name
+        self.source = self.root / name
+        self.source.write_bytes(self.original)
+        self.source.chmod(0o600)
+        self.manifest = {'version': 1, 'documents': [name]}
+        if build is not None:
+            self.manifest['build'] = build
+        (self.root/'draftpair.json').write_text(json.dumps(self.manifest))
+        live = 'live:' + digest(self.original)
+        self.ledger.save(dict(id='a', ch=name, source_version=live, target_version=live,
+                              anchor={'type': 'chapter'}, text='revise'))
+        draft = self.data / name
+        draft.write_bytes(self.original.replace(b'Last line.', b'Revised last line.'))
+        parent = self.ledger.round_info(name)['latest']
+        self.version = self.ledger.publish(name, draft, parent)['id']
+
+    def test_native_markdown_merge_needs_only_source_and_git(self):
+        self.prepare('Night market.md')
+        self.source.write_bytes(self.original.replace(b'Original', b'External'))
+        record = review.merge(self.app, self.ch, self.version)
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['status'], 'complete')
+        self.assertEqual(self.source.read_bytes(), self.original.replace(b'Original', b'External')
+                         .replace(b'Last line.', b'Revised last line.'))
+        if os.name != 'nt':  # Windows shares via ACLs, not POSIX permission bits.
+            self.assertEqual(self.source.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((record.parent / 'before.md').read_bytes(), self.original.replace(b'Original', b'External'))
+        self.assertEqual((record.parent / 'merged.md').read_bytes(), self.source.read_bytes())
+        self.app.refresh_stats.assert_called_once_with(None)
+        self.assertIsNone(self.ledger.round_info(self.ch))
+
+    def test_custom_tex_build_records_exact_html_and_resumes_failed_command(self):
+        output = 'output/proof copy.html'
+        build = {'check': [sys.executable, '-c', 'raise SystemExit(2)'],
+                 'render': [sys.executable, 'make proof.py', output], 'artifact': output}
+        self.prepare('Book.tex', build)
+        (self.root / 'make proof.py').write_text(
+            'from pathlib import Path\nimport sys\n'
+            'p = Path(sys.argv[1]); p.parent.mkdir(exist_ok=True)\n'
+            'p.write_text("<p>" + Path("Book.tex").read_text(encoding="utf-8") + "</p>", encoding="utf-8")\n',
+            encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'check.log'):
+            review.merge(self.app, self.ch, self.version)
+        record, = self.data.glob('merges/*/journal.json')
+        self.app.refresh_stats.assert_not_called()
+        self.manifest['build']['check'] = [sys.executable, '-c', 'print("ok")']
+        (self.root / 'draftpair.json').write_text(json.dumps(self.manifest))
+        args = ['review.py', 'merge-resume', '--journal', str(record)]
+        with patch.object(review, 'Application', return_value=self.app), patch.object(sys, 'argv', args), redirect_stdout(StringIO()):
+            review.main()
+        info = json.loads(record.read_text(encoding='utf-8'))
+        proof = Path(info['review_artifact'])
+        self.assertEqual(info['status'], 'awaiting-artifact-review')
+        self.assertEqual(proof.name, 'review.html')
+        self.assertIn('Revised last line.', proof.read_text(encoding='utf-8'))
+        self.assertEqual((record.parent / 'check.log').read_text(encoding='utf-8').splitlines(), ['ok'])
+        self.app.refresh_stats.assert_called_once_with(self.root / output)
+        (self.root / output).write_text('<p>Different build.</p>')
+        with self.assertRaisesRegex(ValueError, '产物已变化'):
+            review.confirm_merge(self.app, record, info, self.root / output, 'checked')
+        argv = ['review.py', 'merge-complete', '--journal', str(record), '--artifact', str(proof),
+                '--review-note', 'Checked the revised line in the archived HTML.']
+        with patch.object(review, 'Application', return_value=self.app), patch.object(sys, 'argv', argv), redirect_stdout(StringIO()):
+            review.main()
+        self.assertIsNone(self.ledger.round_info(self.ch))
+        self.assertEqual(json.loads(record.read_text(encoding='utf-8'))['status'], 'complete')
+
+    def test_invalid_build_is_rejected_before_writing_source(self):
+        self.prepare('Essay.md')
+        for build in [{'check': 'make check'}, {'artifact': 'out.html'}, {'other': 'x'},
+                      {'render': ['tool'], 'artifact': '../outside.html'},
+                      {'render': ['tool'], 'artifact': self.ch}]:
+            with self.subTest(build=build):
+                self.manifest['build'] = build
+                (self.root / 'draftpair.json').write_text(json.dumps(self.manifest))
+                with self.assertRaises(ValueError):
+                    review.merge(self.app, self.ch, self.version)
+                self.assertEqual(self.source.read_bytes(), self.original)
+                self.assertFalse(tuple(self.data.glob('merges/*/journal.json')))
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    if len(sys.argv) > 1 and sys.argv[1] == '--crash-source':
+        _, _, root_arg, data_arg, ch, version, after = sys.argv
+        root, data = Path(root_arg), Path(data_arg)
+        original = review.atomic
+
+        def crash(path, payload):
+            if path == root/ch and after == '0':
+                os._exit(47)
+            original(path, payload)
+            if path == root/ch:
+                os._exit(47)
+
+        review.atomic = crash
+        review.merge(SimpleNamespace(root=root, data=data, store=Store(root, data), refresh_stats=Mock()), ch, version)
+        raise RuntimeError('Test child unexpectedly finished the merge')
+    else:
+        unittest.main(verbosity=2)

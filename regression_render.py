@@ -85,7 +85,7 @@ def check_fixture(work):
         '<tr><td rowspan="2">活动</td><td>甲</td></tr><tr><td>乙</td></tr></table>\n```\n'
     )
     name = 'sample.qmd'
-    (project/name).write_text(source)
+    (project/name).write_bytes(source.encode('utf-8'))
     svg = project/'原图.svg'
     original = b'<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>'
     updated = original.replace(b'>A<', b'>B<')
@@ -120,7 +120,7 @@ def check_fixture(work):
     assert digest(updated) in new['html']
     assert new['fingerprint'] != figure(live_before)['fingerprint']
     assert figure(r.render(name,source,snap)) == old
-    assert (project/name).read_text()==source
+    assert (project/name).read_text(encoding='utf-8')==source
 
 
 def check_working_citations(work):
@@ -130,7 +130,7 @@ def check_working_citations(work):
     formal = {first:'# 第一章\n\n正式稿。\n', second:'# 第二章\n\n原有文献[@early]。\n',
               refs:'# 参考文献\n\n```{=typst}\n#ldu-bibliography()\n```\n'}
     for name, value in formal.items():
-        (project/name).write_text(value)
+        (project/name).write_bytes(value.encode('utf-8'))
     (project/'_quarto.yml').write_text('book:\n  chapters: [one.qmd, two.qmd, references.qmd]\n'
                                       'bibliography: test.bib\ncsl: numeric.csl\n')
     (project/'test.bib').write_text(''.join(

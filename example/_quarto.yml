@@ -4,7 +4,7 @@ project:
 
 book:
   title: "窗边的一天"
-  author: "页畔示例"
+  author: "对稿示例"
   chapters:
     - index.qmd
     - observation.qmd

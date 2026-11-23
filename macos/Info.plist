@@ -3,21 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>页畔</string>
+	<string>对稿</string>
 	<key>CFBundleExecutable</key>
-	<string>QmdMargin</string>
+	<string>DraftPair</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.sssimplec.qmd-margin</string>
+	<string>io.github.sssimplec.draftpair</string>
 	<key>CFBundleName</key>
-	<string>页畔</string>
+	<string>对稿</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>2.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>

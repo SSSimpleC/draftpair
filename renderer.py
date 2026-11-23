@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from collections import Counter, OrderedDict
@@ -18,6 +19,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from lxml import etree
 from lxml import html as lhtml
+from project import load_manifest
 
 
 HERE = Path(__file__).resolve().parent
@@ -56,7 +58,29 @@ def inside(path, root):
     try:
         return path.resolve().relative_to(root.resolve())
     except ValueError:
-        raise ValueError('路径位于论文项目以外') from None
+        raise ValueError('路径位于文稿项目以外') from None
+
+
+def pandoc_command(prefer_quarto=False):
+    """Use PATH or Quarto's native binary; the CLI also works behind a package-manager shim."""
+    standalone = shutil.which('pandoc')
+    if standalone and not prefer_quarto:
+        return [standalone]
+    quarto = shutil.which('quarto')
+    if not quarto and prefer_quarto and sys.platform == 'darwin':
+        local = Path.home() / 'Applications/quarto/bin/quarto'
+        if local.is_file():
+            quarto = str(local)
+    if quarto:
+        tools = Path(quarto).resolve().parent / 'tools'
+        executable = 'pandoc.exe' if os.name == 'nt' else 'pandoc'
+        for directory in (tools/'aarch64', tools/'x86_64', tools):
+            binary = directory / executable
+            if binary.is_file():
+                return [str(binary)]
+    if standalone:
+        return [standalone]
+    return [quarto, 'pandoc'] if quarto else []
 
 
 def walk(value):
@@ -260,22 +284,78 @@ def fragment_content(element):
     )
 
 
+def freeze_image(root, data_dir, rel):
+    file = root / rel
+    if not file.is_file():
+        raise ValueError('找不到文稿图片：' + rel)
+    data = file.read_bytes()
+    key = digest(data)
+    directory = data_dir/'resources'
+    directory.mkdir(parents=True, exist_ok=True)
+    dest = directory/(key + file.suffix.lower())
+    if not dest.exists():
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as tmp:
+            try:
+                tmp.write(data)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            except BaseException:
+                Path(tmp.name).unlink(missing_ok=True)
+                raise
+        try:
+            os.replace(tmp.name, dest)
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+    return key
+
+
+def display_rows(root, chapter, text, rendered, assets):
+    blocks, headings, used = [], [], {}
+    for saved in rendered:
+        row = dict(saved)
+        resources, checks = row.pop('images'), []
+        for token, name in resources.items():
+            if name not in used:
+                path = root/name
+                if assets is None:
+                    key = digest(path.read_bytes()) if path.is_file() else 'missing'
+                    url = '/asset?path='+quote(name,safe='')+'&v='+key
+                else:
+                    key = assets.get(name)
+                    if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{64}', key):
+                        raise ValueError('快照缺少图片：'+name)
+                    url = '/resource/'+key+path.suffix.lower()
+                used[name] = (key, url)
+            key, url = used[name]
+            checks.append(key)
+            row['html'] = row['html'].replace('data-review-img="'+token+'"', 'src="'+html.escape(url, quote=True)+'"')
+        if checks:
+            row['fingerprint'] = digest(row['fingerprint']+''.join(checks))
+        if row['level']:
+            headings.append({'id':row['id'], 'level':row['level'], 'text':row['text']})
+        blocks.append(row)
+    result = {'blocks':blocks, 'headings':headings, 'source_hash':digest(text), 'title':chapter['title']}
+    return result
+
+
 class Renderer:
     def __init__(self, root: Path, data_dir: Path):
         self.root, self.data_dir = Path(root).resolve(), Path(data_dir).resolve()
-        quarto = shutil.which('quarto')
-        quarto = Path(quarto).resolve() if quarto else Path.home() / 'Applications/quarto/bin/quarto'
-        candidates = [quarto.parent/'tools'/arch/'pandoc' for arch in ('aarch64', 'x86_64')]
-        candidates.append(quarto.parent/'tools/pandoc')
-        self.pandoc = next((p for p in candidates if p.is_file()), None)
-        if self.pandoc is None:
-            raise ValueError('未找到随 Quarto 安装的 Pandoc')
+        self.project = None
+        manifest = load_manifest(self.root)
+        if manifest is not None and manifest.get('reader') != 'quarto':
+            from manuscript import Manuscript
+            self.project = Manuscript(self.root, self.data_dir)
+            return
+        self.pandoc = pandoc_command(prefer_quarto=True)
+        if not self.pandoc:
+            raise ValueError('预览 Quarto 书稿需要安装 Quarto 或 Pandoc')
         self._cache, self._parsed, self._config = OrderedDict(), OrderedDict(), OrderedDict()
         self._history_chapters = OrderedDict()
         self._lock = threading.RLock()
 
     def _run(self, args, stdin):
-        proc = subprocess.run([str(self.pandoc), *map(str, args)], input=stdin, text=True,
+        proc = subprocess.run([*self.pandoc, *map(str, args)], input=stdin, text=True, encoding='utf-8',
                               cwd=self.root, capture_output=True, timeout=90)
         if proc.returncode:
             raise ValueError('论文预览转换失败。' + proc.stderr.strip()[-1200:])
@@ -291,12 +371,16 @@ class Renderer:
         return self._config[key]
 
     def is_chapter(self, name):
+        if self.project is not None:
+            return self.project.is_chapter(name)
         with self._lock:
             book = self._settings()['book']
             return any(name == path for key in ('chapters', 'appendices')
                        for path in chapter_paths(book.get(key)))
 
     def catalog(self):
+        if self.project is not None:
+            return self.project.catalog()
         with self._lock:
             book = self._settings()['book']
             result, number = [], 0
@@ -363,6 +447,8 @@ class Renderer:
         return ([lesson] if lesson.is_file() else []) + [HERE/'review_adapter.lua']
 
     def snapshot_assets(self, text: str, chapter_id: str):
+        if self.project is not None:
+            return self.project.snapshot_assets(text, chapter_id)
         with self._lock:
             if chapter_id not in {c['id'] for c in self.catalog()}:
                 raise ValueError('章节不在论文目录中')
@@ -378,28 +464,7 @@ class Renderer:
                         raise ValueError('无法冻结非本地图片：' + source)
                     if rel in result:
                         continue
-                    file = self.root/rel
-                    if not file.is_file():
-                        raise ValueError('找不到论文图片：' + rel)
-                    data = file.read_bytes()
-                    key = digest(data)
-                    directory = self.data_dir/'resources'
-                    directory.mkdir(parents=True, exist_ok=True)
-                    dest = directory/(key + file.suffix.lower())
-                    if not dest.exists():
-                        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as tmp:
-                            try:
-                                tmp.write(data)
-                                tmp.flush()
-                                os.fsync(tmp.fileno())
-                            except BaseException:
-                                Path(tmp.name).unlink(missing_ok=True)
-                                raise
-                        try:
-                            os.replace(tmp.name, dest)
-                        finally:
-                            Path(tmp.name).unlink(missing_ok=True)
-                    result[rel] = key
+                    result[rel] = freeze_image(self.root, self.data_dir, rel)
             return result
 
     def _render_context(self, catalog, sources, filters):
@@ -567,6 +632,8 @@ class Renderer:
         return remember(self._cache, key, by_chapter, 6)
 
     def render(self, chapter_id: str, text: str, assets: dict | None = None, context: dict | None = None):
+        if self.project is not None:
+            return self.project.render(chapter_id, text, assets)
         with self._lock:
             catalog = self.catalog()
             chapter = next((c for c in catalog if c['id']==chapter_id), None)
@@ -592,31 +659,7 @@ class Renderer:
                     self._history_chapters.move_to_end(history_key)
                     return copy.deepcopy(self._history_chapters[history_key])
             rendered = self._book(catalog, sources, filters, render_context)[chapter_id]
-            blocks, headings, used = [], [], {}
-            for saved in rendered:
-                row = dict(saved)
-                resources, checks = row.pop('images'), []
-                for token, name in resources.items():
-                    if name not in used:
-                        path = self.root/name
-                        if assets is None:
-                            key = digest(path.read_bytes()) if path.is_file() else 'missing'
-                            url = '/asset?path='+quote(name,safe='')+'&v='+key
-                        else:
-                            key = assets.get(name)
-                            if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{64}', key):
-                                raise ValueError('快照缺少图片：'+name)
-                            url = '/resource/'+key+path.suffix.lower()
-                        used[name] = (key, url)
-                    key, url = used[name]
-                    checks.append(key)
-                    row['html'] = row['html'].replace('data-review-img="'+token+'"', 'src="'+html.escape(url, quote=True)+'"')
-                if checks:
-                    row['fingerprint'] = digest(row['fingerprint']+''.join(checks))
-                if row['level']:
-                    headings.append({'id':row['id'], 'level':row['level'], 'text':row['text']})
-                blocks.append(row)
-            result = {'blocks':blocks, 'headings':headings, 'source_hash':digest(text), 'title':chapter['title']}
+            result = display_rows(self.root, chapter, text, rendered, assets)
             if history_key is not None:
                 remember(self._history_chapters, history_key, copy.deepcopy(result), 128)
             return result
