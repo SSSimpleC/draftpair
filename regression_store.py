@@ -245,7 +245,7 @@ class StoreRegression(unittest.TestCase):
         script.write_text('import sys\nfrom pathlib import Path\n'
                           'Path(sys.argv[1]).write_bytes(sys.argv[2].encode("utf-8"))', encoding='utf-8')
         output = self.dir / "实测 & draft's file.txt"
-        value = "稿件's $variable & object"
+        value = "稿件's 《‘桥’》 $variable & object"
         line = store.handoff_command([sys.executable, str(script), str(output), value], True)
         subprocess.run([executable, '-NoProfile', '-NonInteractive', '-Command', line], check=True, timeout=15)
         self.assertEqual(output.read_text(encoding='utf-8'), value)

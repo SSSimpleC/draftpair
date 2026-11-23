@@ -114,6 +114,20 @@ class ManuscriptAdapters(unittest.TestCase):
             self.assertIn('x=y+1','\n'.join(b['text'] for b in fallback['blocks']))
             self.verify_blocks(fallback, main)
 
+    def test_windows_crlf_and_utf8_bom_preserve_title_lines_and_original_bytes(self):
+        name = '日记.md'
+        raw = '\ufeff# **小满**\r\n\r\n换了一场雨。\r\n'.encode('utf-8')
+        path = self.root / name
+        path.write_bytes(raw)
+        self.manifest([name])
+        app = Renderer(self.root, self.data)
+        self.assertEqual(app.catalog()[0]['title'], '小满')
+        view = app.render(name, raw.decode('utf-8'))
+        self.assertEqual(view['source_hash'], digest(raw))
+        self.assertEqual(view['blocks'][0]['t'], 'heading')
+        self.assertEqual(view['blocks'][1]['line_start'], 3)
+        self.assertEqual(path.read_bytes(), raw)
+
     def test_custom_projection_reads_candidate_and_preserves_unmapped_lines(self):
         name = '终点站.scene'
         base = '@ 电车站\n\n（站台空了。）\n\n小安 | 明天还是这个点吗？\n'

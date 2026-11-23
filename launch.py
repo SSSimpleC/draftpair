@@ -40,10 +40,10 @@ def running(root, data):
             return None
         with LOCAL.open(url + 'api/health', timeout=2) as response:
             health = json.load(response)
-        if (health.get('root') == str(root) and health.get('data') == str(data)
+        if (Path(health['root']) == root and Path(health['data']) == data
                 and type(health.get('pid')) is int and health['pid'] == record.get('pid')):
             return {**health, 'url': url, 'control_token': record.get('control_token')}
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         pass
     return None
 

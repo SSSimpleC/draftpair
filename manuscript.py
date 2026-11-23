@@ -52,9 +52,9 @@ def paragraphs(lines):
 
 
 def markdown_tokens(reader, text):
-    lines = text.splitlines()
+    lines = text.removeprefix('\ufeff').splitlines()
     offset = 0
-    if lines and lines[0].lstrip('\ufeff').strip() == '---':
+    if lines and lines[0].strip() == '---':
         for i, line in enumerate(lines[1:], 1):
             if line.strip() in {'---', '...'}:
                 offset = i + 1
@@ -124,7 +124,7 @@ def simple_tex(raw):
 
 
 def latex_blocks(pandoc, text, root):
-    lines = text.splitlines()
+    lines = text.removeprefix('\ufeff').splitlines()
     spans = list(tex_spans(lines))
     originals = ['\n'.join(lines[a:b]) for a, b, _ in spans]
     views = [simple_tex(raw) for raw in originals]
@@ -303,7 +303,8 @@ class Manuscript:
             elif script:
                 sections = adapter_blocks(script, name, text, self.root, self.markdown)
             else:
-                sections = ((a, b, plain_block('\n'.join(lines[a:b]))) for a, b in paragraphs(lines))
+                visible = text.removeprefix('\ufeff').splitlines()
+                sections = ((a, b, plain_block('\n'.join(visible[a:b]))) for a, b in paragraphs(visible))
             seen, slugs, rows = Counter(), {'draftpair-document-start'}, []
             for start, end, markup in sections:
                 raw = '\n'.join(lines[start:end])

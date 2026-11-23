@@ -1,11 +1,12 @@
 """Discover a manuscript and write its reading order without changing any source files."""
 from __future__ import annotations
 
-import json
 import errno
+import json
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 from urllib.parse import unquote, urlsplit
 
@@ -147,6 +148,8 @@ def diagnose(root):
                 if not 1 <= block['line_start'] <= block['line_end'] <= len(text.splitlines()):
                     raise ValueError('预览块的行范围超出源文件：' + name)
             documents.append({'path': name, 'format': formats.get(name, 'quarto'), 'title': entry['title'],
-                              'blocks': len(blocks), 'headings': len(view['headings'])})
+                              'blocks': len(blocks), 'headings': len(view['headings']),
+                              'source_preview_blocks': sum('class="review-source"' in b['html'] for b in blocks)})
     mode = 'manifest' if manifest and manifest.get('reader') != 'quarto' else 'quarto'
-    return {'ok': True, 'mode': mode, 'documents': documents}
+    warnings = [] if shutil.which('git') else ['当前可以阅读、批注和出候选稿。正式合并前请安装 Git。']
+    return {'ok': True, 'mode': mode, 'documents': documents, 'warnings': warnings}

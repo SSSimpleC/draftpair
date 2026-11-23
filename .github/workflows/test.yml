@@ -26,6 +26,6 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt
       - name: Document adapters, annotation ledger and formal statistics
-        run: python -m unittest -v regression_adapters regression_store regression_stats
+        run: python -m unittest -v regression_onboard regression_adapters regression_store regression_merge regression_stats
       - name: Launch, submit, publish, merge and stop
         run: python regression_portable.py

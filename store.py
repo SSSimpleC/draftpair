@@ -41,8 +41,9 @@ def digest(raw):
 
 def handoff_command(arguments, windows):
     if windows:
-        # A PowerShell literal doubles apostrophes; & invokes even a quoted executable.
-        return '& ' + ' '.join("'" + arg.replace("'", "''") + "'" for arg in arguments)
+        # PowerShell treats these four typographic marks as single quotes too.
+        escaped = str.maketrans({mark: mark * 2 for mark in "'‘’‚‛"})
+        return '& ' + ' '.join("'" + arg.translate(escaped) + "'" for arg in arguments)
     return shlex.join(arguments)
 
 

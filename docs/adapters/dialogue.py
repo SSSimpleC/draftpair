@@ -9,7 +9,7 @@ def literal(value):
 
 
 def blocks(source):
-    for number, line in enumerate(source.splitlines(), 1):
+    for number, line in enumerate(source.removeprefix('\ufeff').splitlines(), 1):
         if line.startswith('@ '):
             yield {'start': number, 'end': number, 'markdown': '## ' + literal(line[2:].strip())}
         elif ' | ' in line:

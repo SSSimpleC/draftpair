@@ -34,7 +34,10 @@ PROTOCOL = 2
 
 def default_project():
     parent = HERE.parent
-    return parent if any((parent / name).is_file() for name in (MANIFEST, '_quarto.yml')) else HERE / 'sample'
+    # Keep the original Dock shortcut for an existing v1 manuscript. New installations open the sample.
+    if (parent / '.qmd-margin' / 'review.sqlite3').is_file() and (parent / '_quarto.yml').is_file():
+        return parent
+    return HERE / 'sample'
 
 
 def default_data(root):
@@ -622,7 +625,8 @@ def main():
         else:
             root = args.root.resolve()
             plan = configured_build(root, (args.data or default_data(root)).resolve())
-            result = {**diagnose(root), 'build': plan if plan is not None else 'quarto'}
+            result = {**diagnose(root), 'data': str((args.data or default_data(root)).resolve()),
+                      'build': plan if plan is not None else 'quarto'}
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     if not any((args.root / name).is_file() for name in (MANIFEST, '_quarto.yml')):

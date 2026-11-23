@@ -392,7 +392,8 @@ class Renderer:
                     if path.suffix.lower() != '.qmd':
                         raise ValueError('目录中含有非 QMD 文件：'+name)
                     text = path.read_bytes().decode('utf-8')
-                    first = next((lines for _, _, lines in source_spans(text) if re.match(r'^#\s', lines)), '')
+                    first = next((lines for _, _, lines in source_spans(text.removeprefix('\ufeff'))
+                                  if re.match(r'^#\s', lines)), '')
                     title = re.sub(r'\s*\{[^{}]*\}\s*$', '', re.sub(r'^#\s+', '', first)).strip() or path.stem
                     no = ''
                     if name == 'index.qmd':
