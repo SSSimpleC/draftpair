@@ -18,6 +18,7 @@ const S = { ch:prefs.ch, flow:prefs.flow || 'chapter', view:prefs.view || 'auto'
 let state = {chapters:[],annotations:[],batches:[]};
 let selection = null, hoverTarget = null, editor = null, draftTimer, scrollTimer, refreshBusy = false;
 let editQueue = Promise.resolve(), confirmBatch = null;
+const queuedDrafts = new Map();
 let rows = [], changes = [], toastTimer;
 const q = CSS.escape;
 const current = () => state.chapters.find(c => c.id === S.ch);
@@ -477,18 +478,34 @@ function objectEl(sec,a){
   if(a.sub)return $('[data-sub="'+q(String(a.sub))+'"]',b);
   return b;
 }
-function markAnnotations(){
+function sameDraftSource(ch,shown,source){
+  const c=chapter(ch);
+  if(!c?.round)return false;
+  const frozen=base(c),live='live:'+frozen.source_hash;
+  return (shown===frozen.id && source===live) || (shown===live && source===frozen.id);
+}
+function markAnnotations(notes=allNotes()){
   for(const sec of activeSections()){
-    for(const old of $$('.anno',sec).reverse())old.replaceWith(...old.childNodes);
-    for(const old of $$('.has-anno',sec)){old.classList.remove('has-anno'); delete old.dataset.noteIds;delete old.dataset.count;}
-    sec.normalize();
-    for(const a of state.annotations){
-      if(a.ch!==sec.dataset.ch || a.source_version!==sec.dataset.v || a.recheck)continue;
+    for(const a of notes){
+      if(a.ch!==sec.dataset.ch || a.recheck)continue;
+      const draft=a.status==='draft' && a.anchor.type==='text';
+      if(a.source_version!==sec.dataset.v && !(draft && sameDraftSource(a.ch,sec.dataset.v,a.source_version)))continue;
       if(a.anchor.type==='text'){
+        const selector='.anno[data-note-id="'+q(a.id)+'"]';
+        if(draft && $(selector,sec))continue;
+        const css=draft?'anno draft':a.status==='pending'?'anno':'anno sent';
         for(const part of a.anchor.segs || []){
           const el=secBlock(sec,part.block);
           if(!el || el.textContent.slice(part.off,part.off+part.text.length)!==part.text)continue;
-          wrapText(el,part.off,part.off+part.text.length,'anno'+(eligibleTarget(a)?'':' sent'),a.id);
+          wrapText(el,part.off,part.off+part.text.length,css,a.id);
+        }
+        if(draft){
+          const marks=$$(selector,sec);
+          for(const mark of marks)mark.title='继续编辑草稿';
+          if(marks.length){
+            marks[0].tabIndex=0;marks[0].setAttribute('role','button');
+            marks[0].setAttribute('aria-label','继续编辑草稿，'+a.quote);
+          }
         }
       } else {
         const el=objectEl(sec,a.anchor); if(!el)continue;
@@ -497,6 +514,15 @@ function markAnnotations(){
       }
     }
   }
+}
+function markDraft(d){
+  const notes=payloads(d,false).filter(a=>a.anchor.type==='text');
+  for(const a of notes){
+    if(!a.editing_id)continue;
+    for(const old of $$('.anno[data-note-id="'+q(a.editing_id)+'"]',$('#stage')))old.replaceWith(...old.childNodes);
+  }
+  // Add just these ranges. A pointer may already be down on another note.
+  if(notes.length)markAnnotations(notes);
 }
 function hideActions(){selection=null;hoverTarget=null;$('#selBtn').classList.remove('on');$('#anchorBtn').classList.remove('on');$('#imageBtn').classList.remove('on');}
 const clamp=(v,lo,hi)=>Math.max(lo,Math.min(v,hi));
@@ -582,8 +608,28 @@ function openImage(img){
 $('#imageBtn').onclick=()=>openImage(hoverTarget?.closest('img'));
 $('#stage').addEventListener('dblclick',e=>openImage(e.target.closest('img')));
 $('#imageClose').onclick=()=>$('#imageDlg').close();
+// Chromium starts a drag on focusable inline text instead of selecting it.
+// Restore the tab stops when keyboard navigation resumes.
+$('#stage').addEventListener('pointerdown',e=>{
+  for(const mark of $$('.anno.draft[tabindex]',e.currentTarget))mark.removeAttribute('tabindex');
+},true);
+function resumeMarkedDraft(e){
+  const mark=e.target.closest('.anno.draft');if(!mark)return false;
+  const ids=new Set([mark.dataset.noteId]);
+  if(e.type==='click'){
+    for(let parent=mark.parentElement.closest('.anno.draft');parent;parent=parent.parentElement.closest('.anno.draft'))ids.add(parent.dataset.noteId);
+  }
+  const drafts=allNotes().filter(a=>a.status==='draft' && ids.has(a.id));
+  if(!drafts.length)return false;
+  e.preventDefault();
+  if(drafts.length>1){openPanel(drafts.map(a=>a.id));return true;}
+  const line=Array.from(mark.getClientRects()).find(r=>e.clientX>=r.left && e.clientX<=r.right && e.clientY>=r.top && e.clientY<=r.bottom);
+  resumeNote(drafts[0],line || mark.getBoundingClientRect());
+  return true;
+}
 $('#stage').addEventListener('click',e=>{
   const el=e.target.closest('.chap');if(!el || !getSelection().isCollapsed)return;
+  if(!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && resumeMarkedDraft(e))return;
   const link=e.target.closest('a[href]');
   if(link){
     const href=link.getAttribute('href');
@@ -610,11 +656,20 @@ $('#stage').addEventListener('click',e=>{
   const target=e.target.closest('[data-note-target]');if(target)showObject(target);
 });
 $('#stage').addEventListener('keydown',e=>{
-  if(['Enter',' '].includes(e.key) && e.target.matches('[data-note-target]')){e.preventDefault();objectNote(e.target,e.target.dataset.noteTarget);}
+  if(!['Enter',' '].includes(e.key) || e.isComposing)return;
+  if(e.target.matches('.anno.draft[tabindex]') && resumeMarkedDraft(e))return;
+  if(e.target.matches('[data-note-target]')){e.preventDefault();objectNote(e.target,e.target.dataset.noteTarget);}
 });
 
 function backups(){
-  try{return Object.keys(localStorage).filter(k=>k.startsWith(draftPrefix)).map(readLocal).filter(d=>d?.parts?.length);}catch{return [];}
+  const drafts=new Map();
+  try{
+    for(const key of Object.keys(localStorage).filter(k=>k.startsWith(draftPrefix))){
+      const d=readLocal(key);if(d?.parts?.length)drafts.set(d.key,d);
+    }
+  }catch{}
+  for(const {draft} of queuedDrafts.values())if(!draft.closed)drafts.set(draft.key,draft);
+  return [...drafts.values()];
 }
 function localFor(id){return backups().find(d=>d.parts.some(p=>p.id===id || p.editing_id===id));}
 function stash(d){
@@ -639,13 +694,14 @@ function allNotes(){
   for(const d of backups()){
     for(const p of payloads(d,false)){
       if(p.editing_id)map.delete(p.editing_id);
-      map.set(p.id,{...p,created:(note(p.editing_id) || note(p.id))?.created || p.created,local:true,key:d.key});
+      map.set(p.id,{...p,recheck:p.recheck ?? note(p.id)?.recheck,created:(note(p.editing_id) || note(p.id))?.created || p.created,local:true,key:d.key});
     }
   }
   for(const a of map.values())if(a.status==='draft' && a.editing_id)map.delete(a.editing_id);
   return [...map.values()];
 }
 function begin(parts,rect,saved){
+  if(editor?.saving || editor?.closed)return;
   if(editor)fold();
   if(!saved && reselecting){
     const prior=reselecting;reselecting=null;
@@ -696,6 +752,7 @@ function showEditor(rect){
   $('#edWarn').classList.toggle('on',!!d.error || d.parts.some(p=>note(p.editing_id||p.id)?.recheck));
   $('#edWarn').textContent=d.error || '原文位置有变化，请核对引文。';
   editorBox.classList.add('on');updateMode();
+  $('#edCancel').textContent=d.dirty?'放弃草稿':'取消';
   const w=editorBox.offsetWidth,h=editorBox.offsetHeight;
   const top=rect && rect.bottom+h+8<innerHeight ? rect.bottom+8 : (rect?rect.top-h-8:innerHeight-h-28);
   placeEditor(rect?rect.left:(innerWidth-w)/2,top);
@@ -709,7 +766,9 @@ function updateMode(){
 }
 function draftChanged(){
   const d=editor;if(!d)return;
+  const firstEdit=!d.dirty;
   d.dirty=true;d.seq++;delete d.error;stash(d);clearTimeout(draftTimer);
+  if(firstEdit){markDraft(d);$('#edCancel').textContent='放弃草稿';}
   status('正在暂存…');draftTimer=setTimeout(()=>enqueue(d,false),350);
 }
 async function sendDraft(d,pending){
@@ -740,7 +799,14 @@ async function sendDraft(d,pending){
     return false;
   }
 }
-function enqueue(d,pending){editQueue=editQueue.then(()=>sendDraft(d,pending)).catch(e=>{toast(errText(e));return false;});return editQueue;}
+function enqueue(d,pending){
+  const key=d.key,job={draft:d};
+  queuedDrafts.set(key,job);
+  editQueue=editQueue.then(()=>sendDraft(d,pending)).catch(e=>{toast(errText(e));return false;}).finally(()=>{
+    if(queuedDrafts.get(key)===job)queuedDrafts.delete(key);
+  });
+  return editQueue;
+}
 async function forkDraft(d){
   try{take(await api('state'));}catch(e){toast(errText(e));return;}
   unStash(d); d.key=uuid();d.parts=d.parts.map(p=>newPart(p.ch,p.source_version,working(chapter(p.ch)).id,p.anchor,p.quote));
@@ -748,23 +814,24 @@ async function forkDraft(d){
 }
 function closeBox(){endEditorDrag();editor=null;editorBox.classList.remove('on');hideActions();getSelection().removeAllRanges();topbar();renderPanel();}
 function fold(){
-  const d=editor;if(!d)return;
+  const d=editor;if(!d || d.saving || d.closed)return;
   clearTimeout(draftTimer);
-  if(d.dirty){stash(d);enqueue(d,false);}
+  if(d.dirty){stash(d);enqueue(d,false);markDraft(d);}
   closeBox();
 }
 async function discard(){
-  const d=editor;if(!d)return;
-  clearTimeout(draftTimer);
-  if(d.dirty && !window.confirm('放弃这次输入？'))return;
-  d.closed=true;await editQueue;
+  const d=editor;if(!d || d.saving || d.closed)return;
+  if(d.dirty && !window.confirm('放弃这条草稿？'))return;
+  clearTimeout(draftTimer);d.closed=true;$('#edText').readOnly=true;
   try{
+    await editQueue;
     for(const p of d.parts){const a=note(p.id);if(a?.status==='draft')await commit('annotation/delete',{id:a.id,expected_revision:a.revision});}
     unStash(d);closeBox();render();status('');
   }catch(e){d.closed=false;stash(d);toast(errText(e));}
+  finally{$('#edText').readOnly=false;}
 }
 async function saveEditor(){
-  const d=editor;if(!d || d.saving)return;
+  const d=editor;if(!d || d.saving || d.closed)return;
   const original=d.parts.map(p=>p.quote).join('\n\n');
   if(d.mode==='comment' && !d.text.trim() || d.mode==='replace' && d.repl===original){
     toast(d.mode==='replace'?'替换文字与原文相同':'请先填写意见');$('#edText').focus();return;
@@ -1152,10 +1219,14 @@ function jumpApplied(a){
   const el=corresponding ? secBlock(activeSections()[0],corresponding.id) : $('.chap-head');
   el?.scrollIntoView({block:'center'});el?.classList.add('flash');
 }
-function resumeNote(a){
+function resumeNote(a,rect=jump(a)?.getBoundingClientRect() || null){
   const stashData=localFor(a.id);
-  const rect=jump(a)?.getBoundingClientRect() || null;
   if(stashData){
+    // A quick reopen must share the revision and text of the still-running autosave.
+    if(queuedDrafts.get(stashData.key)?.draft===stashData){
+      if(!stashData.saving && !stashData.closed)begin(stashData.parts,rect,stashData);
+      return;
+    }
     delete stashData.saving;delete stashData.closed;
     const expected=payloads(stashData,false);
     let allEqual=true;
@@ -1328,6 +1399,10 @@ $('#toc').onclick=e=>{
   savePrefs();
 };
 document.addEventListener('keydown',e=>{
+  if(e.key==='Tab'){
+    for(const mark of $$('#stage .anno.draft[role="button"]:not([tabindex])'))mark.tabIndex=0;
+    return;
+  }
   if(e.isComposing || e.target.closest('input,textarea,select,dialog') || document.querySelector('dialog[open]'))return;
   if(e.key==='Escape'){
     if(editor)fold();else if(reselecting){reselecting=null;hideActions();}else if(S.panel)$('#panelClose').click();else hideActions();

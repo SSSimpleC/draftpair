@@ -149,6 +149,12 @@ del,ins{text-decoration:none}
 .anno{text-decoration:underline;text-decoration-color:var(--anno);text-decoration-thickness:2px;text-underline-offset:4px;text-decoration-skip-ink:none;cursor:pointer}
 .anno .anno{text-decoration-style:double}
 .anno.sent{text-decoration-style:dashed}
+.anno.draft{
+  text-decoration-style:dashed;text-decoration-thickness:1.5px;text-underline-offset:.34em;
+  text-decoration-color:rgba(201,138,27,.85);
+  text-decoration-color:color-mix(in srgb,var(--anno) 85%,transparent);
+}
+.anno.draft:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 .anno.recheck{text-decoration-color:var(--warn);text-decoration-style:wavy}
 .anno.focus{background:var(--anno-bg)}
 ::selection{background:#cfe0f3}
